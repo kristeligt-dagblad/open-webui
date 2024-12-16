@@ -1,5 +1,5 @@
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'europe-docker.pkg.dev/$PROJECT_ID/eu.gcr.io/kd-open-webui:latest', '--build-arg', 'BUILDPLATFORM=linux/x86_64', '.']
+  args: ['buildx', 'build', '-t', 'europe-docker.pkg.dev/$PROJECT_ID/eu.gcr.io/kd-open-webui:latest', '--platform', 'linux/amd64,linux/arm64,linux/x86_64', '.']
 images:
 - 'europe-docker.pkg.dev/$PROJECT_ID/eu.gcr.io/kd-open-webui:latest'
