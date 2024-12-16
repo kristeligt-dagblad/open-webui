@@ -269,6 +269,8 @@ DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DATA_DIR}/webui.db")
 if "postgres://" in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
 
+DATABASE_SCHEMA = os.environ.get("DATABASE_SCHEMA", None)
+
 DATABASE_POOL_SIZE = os.environ.get("DATABASE_POOL_SIZE", 0)
 
 if DATABASE_POOL_SIZE == "":
@@ -376,7 +378,7 @@ else:
         AIOHTTP_CLIENT_TIMEOUT = 300
 
 AIOHTTP_CLIENT_TIMEOUT_OPENAI_MODEL_LIST = os.environ.get(
-    "AIOHTTP_CLIENT_TIMEOUT_OPENAI_MODEL_LIST", "5"
+    "AIOHTTP_CLIENT_TIMEOUT_OPENAI_MODEL_LIST", ""
 )
 
 if AIOHTTP_CLIENT_TIMEOUT_OPENAI_MODEL_LIST == "":
