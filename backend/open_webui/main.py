@@ -18,6 +18,8 @@ from typing import Optional
 from aiocache import cached
 import aiohttp
 import requests
+
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -27,7 +29,12 @@ from fastapi import (
     Request,
     UploadFile,
     status,
+    applications,
+    BackgroundTasks,
 )
+
+from fastapi.openapi.docs import get_swagger_ui_html
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -51,6 +58,7 @@ from open_webui.routers import (
     pipelines,
     tasks,
     auths,
+    channels,
     chats,
     folders,
     configs,
@@ -96,9 +104,11 @@ from open_webui.config import (
     AUTOMATIC1111_SAMPLER,
     AUTOMATIC1111_SCHEDULER,
     COMFYUI_BASE_URL,
+    COMFYUI_API_KEY,
     COMFYUI_WORKFLOW,
     COMFYUI_WORKFLOW_NODES,
     ENABLE_IMAGE_GENERATION,
+    ENABLE_IMAGE_PROMPT_GENERATION,
     IMAGE_GENERATION_ENGINE,
     IMAGE_GENERATION_MODEL,
     IMAGE_SIZE,
@@ -171,10 +181,13 @@ from open_webui.config import (
     MOJEEK_SEARCH_API_KEY,
     GOOGLE_PSE_API_KEY,
     GOOGLE_PSE_ENGINE_ID,
+    GOOGLE_DRIVE_CLIENT_ID,
+    GOOGLE_DRIVE_API_KEY,
     ENABLE_RAG_HYBRID_SEARCH,
     ENABLE_RAG_LOCAL_WEB_FETCH,
     ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION,
     ENABLE_RAG_WEB_SEARCH,
+    ENABLE_GOOGLE_DRIVE_INTEGRATION,
     UPLOAD_DIR,
     # WebUI
     WEBUI_AUTH,
@@ -187,6 +200,9 @@ from open_webui.config import (
     ENABLE_SIGNUP,
     ENABLE_LOGIN_FORM,
     ENABLE_API_KEY,
+    ENABLE_API_KEY_ENDPOINT_RESTRICTIONS,
+    API_KEY_ALLOWED_ENDPOINTS,
+    ENABLE_CHANNELS,
     ENABLE_COMMUNITY_SHARING,
     ENABLE_MESSAGE_RATING,
     ENABLE_EVALUATION_ARENA_MODELS,
@@ -210,6 +226,7 @@ from open_webui.config import (
     LDAP_SERVER_LABEL,
     LDAP_SERVER_HOST,
     LDAP_SERVER_PORT,
+    LDAP_ATTRIBUTE_FOR_MAIL,
     LDAP_ATTRIBUTE_FOR_USERNAME,
     LDAP_SEARCH_FILTERS,
     LDAP_SEARCH_BASE,
@@ -226,6 +243,7 @@ from open_webui.config import (
     CORS_ALLOW_ORIGIN,
     DEFAULT_LOCALE,
     OAUTH_PROVIDERS,
+    WEBUI_URL,
     # Admin
     ENABLE_ADMIN_CHAT_ACCESS,
     ENABLE_ADMIN_EXPORT,
@@ -238,6 +256,7 @@ from open_webui.config import (
     ENABLE_AUTOCOMPLETE_GENERATION,
     TITLE_GENERATION_PROMPT_TEMPLATE,
     TAGS_GENERATION_PROMPT_TEMPLATE,
+    IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE,
     TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
     QUERY_GENERATION_PROMPT_TEMPLATE,
     AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
@@ -251,13 +270,13 @@ from open_webui.env import (
     SAFE_MODE,
     SRC_LOG_LEVELS,
     VERSION,
-    WEBUI_URL,
     WEBUI_BUILD_HASH,
     WEBUI_SECRET_KEY,
     WEBUI_SESSION_COOKIE_SAME_SITE,
     WEBUI_SESSION_COOKIE_SECURE,
     WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
     WEBUI_AUTH_TRUSTED_NAME_HEADER,
+    ENABLE_WEBSOCKET_SUPPORT,
     BYPASS_MODEL_ACCESS_CONTROL,
     RESET_CONFIG_ON_START,
     OFFLINE_MODE,
@@ -285,6 +304,7 @@ from open_webui.utils.auth import (
 from open_webui.utils.oauth import oauth_manager
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 
+from open_webui.tasks import stop_task, list_tasks  # Import from tasks.py
 
 if SAFE_MODE:
     print("SAFE MODE ENABLED")
@@ -374,9 +394,15 @@ app.state.OPENAI_MODELS = {}
 #
 ########################################
 
+app.state.config.WEBUI_URL = WEBUI_URL
 app.state.config.ENABLE_SIGNUP = ENABLE_SIGNUP
 app.state.config.ENABLE_LOGIN_FORM = ENABLE_LOGIN_FORM
+
 app.state.config.ENABLE_API_KEY = ENABLE_API_KEY
+app.state.config.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS = (
+    ENABLE_API_KEY_ENDPOINT_RESTRICTIONS
+)
+app.state.config.API_KEY_ALLOWED_ENDPOINTS = API_KEY_ALLOWED_ENDPOINTS
 
 app.state.config.JWT_EXPIRES_IN = JWT_EXPIRES_IN
 
@@ -393,6 +419,8 @@ app.state.config.WEBHOOK_URL = WEBHOOK_URL
 app.state.config.BANNERS = WEBUI_BANNERS
 app.state.config.MODEL_ORDER_LIST = MODEL_ORDER_LIST
 
+
+app.state.config.ENABLE_CHANNELS = ENABLE_CHANNELS
 app.state.config.ENABLE_COMMUNITY_SHARING = ENABLE_COMMUNITY_SHARING
 app.state.config.ENABLE_MESSAGE_RATING = ENABLE_MESSAGE_RATING
 
@@ -412,6 +440,7 @@ app.state.config.ENABLE_LDAP = ENABLE_LDAP
 app.state.config.LDAP_SERVER_LABEL = LDAP_SERVER_LABEL
 app.state.config.LDAP_SERVER_HOST = LDAP_SERVER_HOST
 app.state.config.LDAP_SERVER_PORT = LDAP_SERVER_PORT
+app.state.config.LDAP_ATTRIBUTE_FOR_MAIL = LDAP_ATTRIBUTE_FOR_MAIL
 app.state.config.LDAP_ATTRIBUTE_FOR_USERNAME = LDAP_ATTRIBUTE_FOR_USERNAME
 app.state.config.LDAP_APP_DN = LDAP_APP_DN
 app.state.config.LDAP_APP_PASSWORD = LDAP_APP_PASSWORD
@@ -477,6 +506,7 @@ app.state.config.ENABLE_RAG_WEB_SEARCH = ENABLE_RAG_WEB_SEARCH
 app.state.config.RAG_WEB_SEARCH_ENGINE = RAG_WEB_SEARCH_ENGINE
 app.state.config.RAG_WEB_SEARCH_DOMAIN_FILTER_LIST = RAG_WEB_SEARCH_DOMAIN_FILTER_LIST
 
+app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION = ENABLE_GOOGLE_DRIVE_INTEGRATION
 app.state.config.SEARXNG_QUERY_URL = SEARXNG_QUERY_URL
 app.state.config.GOOGLE_PSE_API_KEY = GOOGLE_PSE_API_KEY
 app.state.config.GOOGLE_PSE_ENGINE_ID = GOOGLE_PSE_ENGINE_ID
@@ -504,6 +534,22 @@ app.state.rf = None
 app.state.YOUTUBE_LOADER_TRANSLATION = None
 
 
+try:
+    app.state.ef = get_ef(
+        app.state.config.RAG_EMBEDDING_ENGINE,
+        app.state.config.RAG_EMBEDDING_MODEL,
+        RAG_EMBEDDING_MODEL_AUTO_UPDATE,
+    )
+
+    app.state.rf = get_rf(
+        app.state.config.RAG_RERANKING_MODEL,
+        RAG_RERANKING_MODEL_AUTO_UPDATE,
+    )
+except Exception as e:
+    log.error(f"Error updating models: {e}")
+    pass
+
+
 app.state.EMBEDDING_FUNCTION = get_embedding_function(
     app.state.config.RAG_EMBEDDING_ENGINE,
     app.state.config.RAG_EMBEDDING_MODEL,
@@ -521,21 +567,6 @@ app.state.EMBEDDING_FUNCTION = get_embedding_function(
     app.state.config.RAG_EMBEDDING_BATCH_SIZE,
 )
 
-try:
-    app.state.ef = get_ef(
-        app.state.config.RAG_EMBEDDING_ENGINE,
-        app.state.config.RAG_EMBEDDING_MODEL,
-        RAG_EMBEDDING_MODEL_AUTO_UPDATE,
-    )
-
-    app.state.rf = get_rf(
-        app.state.config.RAG_RERANKING_MODEL,
-        RAG_RERANKING_MODEL_AUTO_UPDATE,
-    )
-except Exception as e:
-    log.error(f"Error updating models: {e}")
-    pass
-
 
 ########################################
 #
@@ -545,6 +576,7 @@ except Exception as e:
 
 app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
+app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 
 app.state.config.IMAGES_OPENAI_API_BASE_URL = IMAGES_OPENAI_API_BASE_URL
 app.state.config.IMAGES_OPENAI_API_KEY = IMAGES_OPENAI_API_KEY
@@ -557,6 +589,7 @@ app.state.config.AUTOMATIC1111_CFG_SCALE = AUTOMATIC1111_CFG_SCALE
 app.state.config.AUTOMATIC1111_SAMPLER = AUTOMATIC1111_SAMPLER
 app.state.config.AUTOMATIC1111_SCHEDULER = AUTOMATIC1111_SCHEDULER
 app.state.config.COMFYUI_BASE_URL = COMFYUI_BASE_URL
+app.state.config.COMFYUI_API_KEY = COMFYUI_API_KEY
 app.state.config.COMFYUI_WORKFLOW = COMFYUI_WORKFLOW
 app.state.config.COMFYUI_WORKFLOW_NODES = COMFYUI_WORKFLOW_NODES
 
@@ -614,6 +647,10 @@ app.state.config.ENABLE_TAGS_GENERATION = ENABLE_TAGS_GENERATION
 
 app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE = TITLE_GENERATION_PROMPT_TEMPLATE
 app.state.config.TAGS_GENERATION_PROMPT_TEMPLATE = TAGS_GENERATION_PROMPT_TEMPLATE
+app.state.config.IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE = (
+    IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE
+)
+
 app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = (
     TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
 )
@@ -722,6 +759,8 @@ app.include_router(configs.router, prefix="/api/v1/configs", tags=["configs"])
 app.include_router(auths.router, prefix="/api/v1/auths", tags=["auths"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 
+
+app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])
 app.include_router(chats.router, prefix="/api/v1/chats", tags=["chats"])
 
 app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
@@ -810,11 +849,11 @@ async def chat_completion(
     request: Request,
     form_data: dict,
     user=Depends(get_verified_user),
-    bypass_filter: bool = False,
 ):
     if not request.app.state.MODELS:
         await get_all_models(request)
 
+    tasks = form_data.pop("background_tasks", None)
     try:
         model_id = form_data.get("model", None)
         if model_id not in request.app.state.MODELS:
@@ -822,13 +861,26 @@ async def chat_completion(
         model = request.app.state.MODELS[model_id]
 
         # Check if user has access to the model
-        if not bypass_filter and user.role == "user":
+        if not BYPASS_MODEL_ACCESS_CONTROL and user.role == "user":
             try:
                 check_model_access(user, model)
             except Exception as e:
                 raise e
 
-        form_data, events = await process_chat_payload(request, form_data, user, model)
+        metadata = {
+            "user_id": user.id,
+            "chat_id": form_data.pop("chat_id", None),
+            "message_id": form_data.pop("id", None),
+            "session_id": form_data.pop("session_id", None),
+            "tool_ids": form_data.get("tool_ids", None),
+            "files": form_data.get("files", None),
+            "features": form_data.get("features", None),
+        }
+        form_data["metadata"] = metadata
+
+        form_data, events = await process_chat_payload(
+            request, form_data, metadata, user, model
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -836,10 +888,10 @@ async def chat_completion(
         )
 
     try:
-        response = await chat_completion_handler(
-            request, form_data, user, bypass_filter
+        response = await chat_completion_handler(request, form_data, user)
+        return await process_chat_response(
+            request, response, form_data, user, events, metadata, tasks
         )
-        return await process_chat_response(response, events)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -876,6 +928,20 @@ async def chat_action(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+
+
+@app.post("/api/tasks/stop/{task_id}")
+async def stop_task_endpoint(task_id: str, user=Depends(get_verified_user)):
+    try:
+        result = await stop_task(task_id)  # Use the function from tasks.py
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@app.get("/api/tasks")
+async def list_tasks_endpoint(user=Depends(get_verified_user)):
+    return {"tasks": list_tasks()}  # Use the function from tasks.py
 
 
 ##################################
@@ -925,9 +991,12 @@ async def get_app_config(request: Request):
             "enable_api_key": app.state.config.ENABLE_API_KEY,
             "enable_signup": app.state.config.ENABLE_SIGNUP,
             "enable_login_form": app.state.config.ENABLE_LOGIN_FORM,
+            "enable_websocket": ENABLE_WEBSOCKET_SUPPORT,
             **(
                 {
+                    "enable_channels": app.state.config.ENABLE_CHANNELS,
                     "enable_web_search": app.state.config.ENABLE_RAG_WEB_SEARCH,
+                    "enable_google_drive_integration": app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
                     "enable_image_generation": app.state.config.ENABLE_IMAGE_GENERATION,
                     "enable_community_sharing": app.state.config.ENABLE_COMMUNITY_SHARING,
                     "enable_message_rating": app.state.config.ENABLE_MESSAGE_RATING,
@@ -937,6 +1006,10 @@ async def get_app_config(request: Request):
                 if user is not None
                 else {}
             ),
+        },
+        "google_drive": {
+            "client_id": GOOGLE_DRIVE_CLIENT_ID.value,
+            "api_key": GOOGLE_DRIVE_API_KEY.value,
         },
         **(
             {
@@ -1082,9 +1155,9 @@ async def get_opensearch_xml():
     <ShortName>{WEBUI_NAME}</ShortName>
     <Description>Search {WEBUI_NAME}</Description>
     <InputEncoding>UTF-8</InputEncoding>
-    <Image width="16" height="16" type="image/x-icon">{WEBUI_URL}/static/favicon.png</Image>
-    <Url type="text/html" method="get" template="{WEBUI_URL}/?q={"{searchTerms}"}"/>
-    <moz:SearchForm>{WEBUI_URL}</moz:SearchForm>
+    <Image width="16" height="16" type="image/x-icon">{app.state.config.WEBUI_URL}/static/favicon.png</Image>
+    <Url type="text/html" method="get" template="{app.state.config.WEBUI_URL}/?q={"{searchTerms}"}"/>
+    <moz:SearchForm>{app.state.config.WEBUI_URL}</moz:SearchForm>
     </OpenSearchDescription>
     """
     return Response(content=xml_content, media_type="application/xml")
@@ -1103,6 +1176,19 @@ async def healthcheck_with_db():
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/cache", StaticFiles(directory=CACHE_DIR), name="cache")
+
+
+def swagger_ui_html(*args, **kwargs):
+    return get_swagger_ui_html(
+        *args,
+        **kwargs,
+        swagger_js_url="/static/swagger-ui/swagger-ui-bundle.js",
+        swagger_css_url="/static/swagger-ui/swagger-ui.css",
+        swagger_favicon_url="/static/swagger-ui/favicon.png",
+    )
+
+
+applications.get_swagger_ui_html = swagger_ui_html
 
 if os.path.exists(FRONTEND_BUILD_DIR):
     mimetypes.add_type("text/javascript", ".js")

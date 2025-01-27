@@ -1,5 +1,4 @@
-import json
-from typing import Optional, Union
+from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 import logging
@@ -12,15 +11,21 @@ from open_webui.models.knowledge import (
 )
 from open_webui.models.files import Files, FileModel
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
-from open_webui.routers.retrieval import process_file, ProcessFileForm
-
+from open_webui.routers.retrieval import (
+    process_file,
+    ProcessFileForm,
+    process_files_batch,
+    BatchProcessFilesForm,
+)
+from open_webui.storage.provider import Storage
 
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 
 
 from open_webui.env import SRC_LOG_LEVELS
+from open_webui.models.models import Models, ModelForm
 
 
 log = logging.getLogger(__name__)
@@ -208,8 +213,12 @@ async def update_knowledge_by_id(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
-
-    if knowledge.user_id != user.id and user.role != "admin":
+    # Is the user the original creator, in a group with write access, or an admin
+    if (
+        knowledge.user_id != user.id
+        and not has_access(user.id, "write", knowledge.access_control)
+        and user.role != "admin"
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -415,11 +424,16 @@ def remove_file_from_knowledge_by_id(
         collection_name=knowledge.id, filter={"file_id": form_data.file_id}
     )
 
-    result = VECTOR_DB_CLIENT.query(
-        collection_name=knowledge.id,
-        filter={"file_id": form_data.file_id},
-    )
+    # Remove the file's collection from vector database
+    file_collection = f"file-{form_data.file_id}"
+    if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+        VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
 
+    # Delete physical file
+    if file.path:
+        Storage.delete_file(file.path)
+
+    # Delete file from database
     Files.delete_file_by_id(form_data.file_id)
 
     if knowledge:
@@ -476,6 +490,36 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    log.info(f"Deleting knowledge base: {id} (name: {knowledge.name})")
+
+    # Get all models
+    models = Models.get_all_models()
+    log.info(f"Found {len(models)} models to check for knowledge base {id}")
+
+    # Update models that reference this knowledge base
+    for model in models:
+        if model.meta and hasattr(model.meta, "knowledge"):
+            knowledge_list = model.meta.knowledge or []
+            # Filter out the deleted knowledge base
+            updated_knowledge = [k for k in knowledge_list if k.get("id") != id]
+
+            # If the knowledge list changed, update the model
+            if len(updated_knowledge) != len(knowledge_list):
+                log.info(f"Updating model {model.id} to remove knowledge base {id}")
+                model.meta.knowledge = updated_knowledge
+                # Create a ModelForm for the update
+                model_form = ModelForm(
+                    id=model.id,
+                    name=model.name,
+                    base_model_id=model.base_model_id,
+                    meta=model.meta,
+                    params=model.params,
+                    access_control=model.access_control,
+                    is_active=model.is_active,
+                )
+                Models.update_model_by_id(model.id, model_form)
+
+    # Clean up vector DB
     try:
         VECTOR_DB_CLIENT.delete_collection(collection_name=id)
     except Exception as e:
@@ -514,3 +558,86 @@ async def reset_knowledge_by_id(id: str, user=Depends(get_verified_user)):
     knowledge = Knowledges.update_knowledge_data_by_id(id=id, data={"file_ids": []})
 
     return knowledge
+
+
+############################
+# AddFilesToKnowledge
+############################
+
+
+@router.post("/{id}/files/batch/add", response_model=Optional[KnowledgeFilesResponse])
+def add_files_to_knowledge_batch(
+    request: Request,
+    id: str,
+    form_data: list[KnowledgeFileIdForm],
+    user=Depends(get_verified_user),
+):
+    """
+    Add multiple files to a knowledge base
+    """
+    knowledge = Knowledges.get_knowledge_by_id(id=id)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if knowledge.user_id != user.id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    # Get files content
+    print(f"files/batch/add - {len(form_data)} files")
+    files: List[FileModel] = []
+    for form in form_data:
+        file = Files.get_file_by_id(form.file_id)
+        if not file:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File {form.file_id} not found",
+            )
+        files.append(file)
+
+    # Process files
+    try:
+        result = process_files_batch(
+            request=request,
+            form_data=BatchProcessFilesForm(files=files, collection_name=id),
+            user=user,
+        )
+    except Exception as e:
+        log.error(
+            f"add_files_to_knowledge_batch: Exception occurred: {e}", exc_info=True
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Add successful files to knowledge base
+    data = knowledge.data or {}
+    existing_file_ids = data.get("file_ids", [])
+
+    # Only add files that were successfully processed
+    successful_file_ids = [r.file_id for r in result.results if r.status == "completed"]
+    for file_id in successful_file_ids:
+        if file_id not in existing_file_ids:
+            existing_file_ids.append(file_id)
+
+    data["file_ids"] = existing_file_ids
+    knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
+
+    # If there were any errors, include them in the response
+    if result.errors:
+        error_details = [f"{err.file_id}: {err.error}" for err in result.errors]
+        return KnowledgeFilesResponse(
+            **knowledge.model_dump(),
+            files=Files.get_files_by_ids(existing_file_ids),
+            warnings={
+                "message": "Some files failed to process",
+                "errors": error_details,
+            },
+        )
+
+    return KnowledgeFilesResponse(
+        **knowledge.model_dump(), files=Files.get_files_by_ids(existing_file_ids)
+    )

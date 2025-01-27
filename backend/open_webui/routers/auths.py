@@ -51,7 +51,7 @@ from open_webui.utils.access_control import get_permissions
 from typing import Optional, List
 
 from ssl import CERT_REQUIRED, PROTOCOL_TLS
-from ldap3 import Server, Connection, ALL, Tls
+from ldap3 import Server, Connection, NONE, Tls
 from ldap3.utils.conv import escape_filter_chars
 
 router = APIRouter()
@@ -170,6 +170,7 @@ async def ldap_auth(request: Request, response: Response, form_data: LdapForm):
     LDAP_SERVER_LABEL = request.app.state.config.LDAP_SERVER_LABEL
     LDAP_SERVER_HOST = request.app.state.config.LDAP_SERVER_HOST
     LDAP_SERVER_PORT = request.app.state.config.LDAP_SERVER_PORT
+    LDAP_ATTRIBUTE_FOR_MAIL = request.app.state.config.LDAP_ATTRIBUTE_FOR_MAIL
     LDAP_ATTRIBUTE_FOR_USERNAME = request.app.state.config.LDAP_ATTRIBUTE_FOR_USERNAME
     LDAP_SEARCH_BASE = request.app.state.config.LDAP_SEARCH_BASE
     LDAP_SEARCH_FILTERS = request.app.state.config.LDAP_SEARCH_FILTERS
@@ -201,7 +202,7 @@ async def ldap_auth(request: Request, response: Response, form_data: LdapForm):
         server = Server(
             host=LDAP_SERVER_HOST,
             port=LDAP_SERVER_PORT,
-            get_info=ALL,
+            get_info=NONE,
             use_ssl=LDAP_USE_TLS,
             tls=tls,
         )
@@ -218,7 +219,11 @@ async def ldap_auth(request: Request, response: Response, form_data: LdapForm):
         search_success = connection_app.search(
             search_base=LDAP_SEARCH_BASE,
             search_filter=f"(&({LDAP_ATTRIBUTE_FOR_USERNAME}={escape_filter_chars(form_data.user.lower())}){LDAP_SEARCH_FILTERS})",
-            attributes=[f"{LDAP_ATTRIBUTE_FOR_USERNAME}", "mail", "cn"],
+            attributes=[
+                f"{LDAP_ATTRIBUTE_FOR_USERNAME}",
+                f"{LDAP_ATTRIBUTE_FOR_MAIL}",
+                "cn",
+            ],
         )
 
         if not search_success:
@@ -226,7 +231,9 @@ async def ldap_auth(request: Request, response: Response, form_data: LdapForm):
 
         entry = connection_app.entries[0]
         username = str(entry[f"{LDAP_ATTRIBUTE_FOR_USERNAME}"]).lower()
-        mail = str(entry["mail"])
+        mail = str(entry[f"{LDAP_ATTRIBUTE_FOR_MAIL}"])
+        if not mail or mail == "" or mail == "[]":
+            raise HTTPException(400, f"User {form_data.user} does not have mail.")
         cn = str(entry["cn"])
         user_dn = entry.entry_dn
 
@@ -547,7 +554,6 @@ async def add_user(form_data: AddUserForm, user=Depends(get_admin_user)):
         raise HTTPException(400, detail=ERROR_MESSAGES.EMAIL_TAKEN)
 
     try:
-        print(form_data)
         hashed = get_password_hash(form_data.password)
         user = Auths.insert_new_auth(
             form_data.email.lower(),
@@ -614,8 +620,12 @@ async def get_admin_details(request: Request, user=Depends(get_current_user)):
 async def get_admin_config(request: Request, user=Depends(get_admin_user)):
     return {
         "SHOW_ADMIN_DETAILS": request.app.state.config.SHOW_ADMIN_DETAILS,
+        "WEBUI_URL": request.app.state.config.WEBUI_URL,
         "ENABLE_SIGNUP": request.app.state.config.ENABLE_SIGNUP,
         "ENABLE_API_KEY": request.app.state.config.ENABLE_API_KEY,
+        "ENABLE_API_KEY_ENDPOINT_RESTRICTIONS": request.app.state.config.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS,
+        "API_KEY_ALLOWED_ENDPOINTS": request.app.state.config.API_KEY_ALLOWED_ENDPOINTS,
+        "ENABLE_CHANNELS": request.app.state.config.ENABLE_CHANNELS,
         "DEFAULT_USER_ROLE": request.app.state.config.DEFAULT_USER_ROLE,
         "JWT_EXPIRES_IN": request.app.state.config.JWT_EXPIRES_IN,
         "ENABLE_COMMUNITY_SHARING": request.app.state.config.ENABLE_COMMUNITY_SHARING,
@@ -625,8 +635,12 @@ async def get_admin_config(request: Request, user=Depends(get_admin_user)):
 
 class AdminConfig(BaseModel):
     SHOW_ADMIN_DETAILS: bool
+    WEBUI_URL: str
     ENABLE_SIGNUP: bool
     ENABLE_API_KEY: bool
+    ENABLE_API_KEY_ENDPOINT_RESTRICTIONS: bool
+    API_KEY_ALLOWED_ENDPOINTS: str
+    ENABLE_CHANNELS: bool
     DEFAULT_USER_ROLE: str
     JWT_EXPIRES_IN: str
     ENABLE_COMMUNITY_SHARING: bool
@@ -638,8 +652,18 @@ async def update_admin_config(
     request: Request, form_data: AdminConfig, user=Depends(get_admin_user)
 ):
     request.app.state.config.SHOW_ADMIN_DETAILS = form_data.SHOW_ADMIN_DETAILS
+    request.app.state.config.WEBUI_URL = form_data.WEBUI_URL
     request.app.state.config.ENABLE_SIGNUP = form_data.ENABLE_SIGNUP
+
     request.app.state.config.ENABLE_API_KEY = form_data.ENABLE_API_KEY
+    request.app.state.config.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS = (
+        form_data.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS
+    )
+    request.app.state.config.API_KEY_ALLOWED_ENDPOINTS = (
+        form_data.API_KEY_ALLOWED_ENDPOINTS
+    )
+
+    request.app.state.config.ENABLE_CHANNELS = form_data.ENABLE_CHANNELS
 
     if form_data.DEFAULT_USER_ROLE in ["pending", "user", "admin"]:
         request.app.state.config.DEFAULT_USER_ROLE = form_data.DEFAULT_USER_ROLE
@@ -657,8 +681,12 @@ async def update_admin_config(
 
     return {
         "SHOW_ADMIN_DETAILS": request.app.state.config.SHOW_ADMIN_DETAILS,
+        "WEBUI_URL": request.app.state.config.WEBUI_URL,
         "ENABLE_SIGNUP": request.app.state.config.ENABLE_SIGNUP,
         "ENABLE_API_KEY": request.app.state.config.ENABLE_API_KEY,
+        "ENABLE_API_KEY_ENDPOINT_RESTRICTIONS": request.app.state.config.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS,
+        "API_KEY_ALLOWED_ENDPOINTS": request.app.state.config.API_KEY_ALLOWED_ENDPOINTS,
+        "ENABLE_CHANNELS": request.app.state.config.ENABLE_CHANNELS,
         "DEFAULT_USER_ROLE": request.app.state.config.DEFAULT_USER_ROLE,
         "JWT_EXPIRES_IN": request.app.state.config.JWT_EXPIRES_IN,
         "ENABLE_COMMUNITY_SHARING": request.app.state.config.ENABLE_COMMUNITY_SHARING,
@@ -670,6 +698,7 @@ class LdapServerConfig(BaseModel):
     label: str
     host: str
     port: Optional[int] = None
+    attribute_for_mail: str = "mail"
     attribute_for_username: str = "uid"
     app_dn: str
     app_dn_password: str
@@ -686,6 +715,7 @@ async def get_ldap_server(request: Request, user=Depends(get_admin_user)):
         "label": request.app.state.config.LDAP_SERVER_LABEL,
         "host": request.app.state.config.LDAP_SERVER_HOST,
         "port": request.app.state.config.LDAP_SERVER_PORT,
+        "attribute_for_mail": request.app.state.config.LDAP_ATTRIBUTE_FOR_MAIL,
         "attribute_for_username": request.app.state.config.LDAP_ATTRIBUTE_FOR_USERNAME,
         "app_dn": request.app.state.config.LDAP_APP_DN,
         "app_dn_password": request.app.state.config.LDAP_APP_PASSWORD,
@@ -704,6 +734,7 @@ async def update_ldap_server(
     required_fields = [
         "label",
         "host",
+        "attribute_for_mail",
         "attribute_for_username",
         "app_dn",
         "app_dn_password",
@@ -722,6 +753,7 @@ async def update_ldap_server(
     request.app.state.config.LDAP_SERVER_LABEL = form_data.label
     request.app.state.config.LDAP_SERVER_HOST = form_data.host
     request.app.state.config.LDAP_SERVER_PORT = form_data.port
+    request.app.state.config.LDAP_ATTRIBUTE_FOR_MAIL = form_data.attribute_for_mail
     request.app.state.config.LDAP_ATTRIBUTE_FOR_USERNAME = (
         form_data.attribute_for_username
     )
@@ -737,6 +769,7 @@ async def update_ldap_server(
         "label": request.app.state.config.LDAP_SERVER_LABEL,
         "host": request.app.state.config.LDAP_SERVER_HOST,
         "port": request.app.state.config.LDAP_SERVER_PORT,
+        "attribute_for_mail": request.app.state.config.LDAP_ATTRIBUTE_FOR_MAIL,
         "attribute_for_username": request.app.state.config.LDAP_ATTRIBUTE_FOR_USERNAME,
         "app_dn": request.app.state.config.LDAP_APP_DN,
         "app_dn_password": request.app.state.config.LDAP_APP_PASSWORD,
